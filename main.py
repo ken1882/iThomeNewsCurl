@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt, QDateTime, QDate
+from PyQt5.QtCore import Qt, QDateTime, QDate, QThread, QObject, pyqtSignal
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QGridLayout, QMessageBox, QFileDialog,
               QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QDateTimeEdit, 
@@ -10,6 +10,7 @@ import requests
 from datetime import date, datetime, timedelta
 from bs4 import BeautifulSoup as BS
 from threading import Thread
+from time import sleep
 
 RootURI   = 'http://www.ithome.com.tw'
 TargetURI = "http://www.ithome.com.tw/taxonomy/term/5971/all"
@@ -171,6 +172,106 @@ def parse_content_tags(doc):
       ret.add(tag)
   return ret
 
+class QtCurlWorker(QObject):
+  finished = pyqtSignal()
+  errored  = pyqtSignal()
+  aborted  = pyqtSignal()
+  
+  def __init__(self, parent_window, start_date, end_date):
+    super(QtCurlWorker, self).__init__()
+    self.parent_window = parent_window
+    self.save_path = self.parent_window.save_path
+    self.start_qdate = start_date
+    self.end_qdate   = end_date
+
+  def run(self):
+    self.start_async(self.save_path)
+
+  def verify_internet(self):
+    self.parent_window.edit_log.moveCursor(QTextCursor.End)
+    self.parent_window.edit_log.append("\n確認連線狀態...")
+    if not is_internet_available():
+      self.aborted.emit()
+      self.parent_window.edit_log.append("無網路連線")
+      QMessageBox.critical(None, 'Error', '沒有網際網路連線!')
+      return False
+    else:
+      self.parent_window.edit_log.append("已連線")
+    return True
+
+  def start_async(self, output_path):
+    global LastError, Signal
+    try:
+      self._start_async_proc(output_path)
+      self.finished.emit()
+    except Exception as err:
+      err_info = traceback.format_exc()
+      LastError = (err, err_info)
+      self.errored.emit()
+
+  def _start_async_proc(self, output_path):
+    if not self.verify_internet():
+      return
+    qdate_st = self.start_qdate
+    qdate_ed = self.end_qdate
+    date_st  = datetime(qdate_st.year(), qdate_st.month(), qdate_st.day())
+    date_ed  = datetime(qdate_ed.year(), qdate_ed.month(), qdate_ed.day()) + timedelta(1)
+    if date_ed < date_st:
+      date_st,date_ed = date_ed,date_st
+    page = 0
+    html = None
+    flag_outdated = False
+    print(date_st, date_ed)
+    try:
+      file = open(output_path, 'w')
+      file.write("標題,網址,分類\n")
+      while not flag_outdated:
+        # Index processing
+        uri = f"{TargetURI}?{PageParam}={page}"
+        print("Connecting to", uri)
+        self.parent_window.edit_log.append(f"正在連線至 {uri}")
+        try:
+          html = requests.get(uri).content
+          html = BS(html, 'html.parser')
+        except Exception:
+          self.aborted.emit()
+          self.parent_window.edit_log.append(f"程式無法連線至 {uri}")
+          QMessageBox.critical(None, 'Error', f"程式無法連線至 {uri}; 請檢查網路連線正常且該網站有上線.")
+          break
+        posts = parse_content(html)
+        page += 1
+        # last page (has nothing)
+        if not posts:
+          break
+        for post in posts:
+          title = post['title']
+          date  = str2date(post['date'])
+          if date > date_ed:
+            pass
+          if date < date_st:
+            flag_outdated = True
+            break
+          print(title, date)
+          file.write(f"{title},{post['link']},")
+          
+          # get link to news post and extract tags
+          self.parent_window.edit_log.append(f"正在取得新聞分類 (標題: {title})")
+          print("Getting tags")
+          try:
+            html = requests.get(post['link']).content
+            html = BS(html, 'html.parser')
+          except Exception:
+            self.aborted.emit()
+            self.parent_window.edit_log.append(f"程式無法連線至 {post['link']}")
+            QMessageBox.critical(None, 'Error', f"程式無法連線至 {post['link']}; 請檢查網路連線正常且該網站有上線.")
+            break
+          tags = parse_content_tags(html)
+          file.write(" ".join(tags) + '\n')
+        # for each post
+      # while not outdated
+    finally:
+      file.close()
+
 ### GUI section
 class MainGUI(QMainWindow):
   def __init__(self):
@@ -257,125 +358,50 @@ class MainGUI(QMainWindow):
     
 
   def execute_mainproc(self):
-    global Signal
     self.edit_log.append("程式開始運行...")
     save_path, _ = QFileDialog.getSaveFileName(self, '另存為...', './', 'CSV UTF-8 (逗號分隔) (*.csv)')
+    self.save_path = save_path
     if not save_path:
-      Signal = SigAbort
       return
     self.edit_log.append(f"輸出路徑: {save_path}")
     if not is_file_writable(save_path):
-      Signal = SigAbort
       self.edit_log.append("程式無法輸出至指定的檔案")
       QMessageBox.critical(None, 'Error', '無法輸出至指定的路徑, 請確認您有權限寫入且該檔案沒有被開啟!')
       return
-
     self.disable_buttons()
-    Signal = SigWorking
-    _th = Thread(target=self.start_async, args=(save_path,))
-    _th.start()
-    while Signal == SigWorking:
-      MainApp.processEvents()
+    self.thread = QThread()
+    self.worker = QtCurlWorker(self, self.in_startdate.date(), self.in_enddate.date())
+    self.worker.moveToThread(self.thread)
+    self.thread.started.connect(self.worker.run)
+    self.worker.finished.connect(self.on_worker_finished)
+    self.thread.finished.connect(self.thread.deleteLater)
+    self.thread.start()
     
-    if Signal == SigError and LastError:
-      handle_exception(*LastError, window=MainWindow)
-    else:
-      self.edit_log.append("程式執行完畢!")
-      QMessageBox.information(self, 'Info', "程式執行完畢!", QMessageBox.Ok)
-    self.enable_buttons()
-
+  def on_worker_finished(self):
+    print("Worker finished")
+    self.edit_log.append("程式執行完畢!")
+    QMessageBox.information(self, 'Info', "程式執行完畢!", QMessageBox.Ok)
+    self.terminate_worker()
     if self.auto_open:
-        _ok = open_external_file(save_path)
-        if not _ok:
-          self.edit_log("自動開啟不支援當前版本的作業系統, 請手動開啟")
-
-  def verify_internet(self):
-    global Signal
-    self.edit_log.moveCursor(QTextCursor.End)
-    self.edit_log.append("\n確認連線狀態...")
-    if not is_internet_available():
-      Signal = SigAbort
-      self.edit_log.append("無網路連線")
-      QMessageBox.critical(None, 'Error', '沒有網際網路連線!')
-      return False
-    else:
-      self.edit_log.append("已連線")
-    return True
-
-  def start_async(self, output_path):
-    global LastError, Signal
-    try:
-      self._start_async_proc(output_path)
-      Signal = SigComplete
-    except Exception as err:
-      err_info = traceback.format_exc()
-      LastError = (err, err_info)
-      Signal = SigError
-
-  def _start_async_proc(self, output_path):
-    global Signal
-    if not self.verify_internet():
-      print('asd')
-      return
-    print(2)
-    qdate_st = self.in_startdate.date()
-    qdate_ed = self.in_enddate.date()
-    date_st  = datetime(qdate_st.year(), qdate_st.month(), qdate_st.day())
-    date_ed  = datetime(qdate_ed.year(), qdate_ed.month(), qdate_ed.day()) + timedelta(1)
-    if date_ed < date_st:
-      date_st,date_ed = date_ed,date_st
-    page = 0
-    html = None
-    flag_outdated = False
-    try:
-      file = open(output_path, 'w')
-      file.write("標題,網址,分類\n")
-      
-      while not flag_outdated:
-        # Index processing
-        uri = f"{TargetURI}?{PageParam}={page}"
-        self.edit_log.append(f"正在連線至 {uri}")
-        try:
-          html = requests.get(uri).content
-          html = BS(html, 'html.parser')
-        except Exception:
-          Signal = SigAbort
-          self.edit_log.append(f"程式無法連線至 {uri}")
-          QMessageBox.critical(None, 'Error', f"程式無法連線至 {uri}; 請檢查網路連線正常且該網站有上線.")
-          break
-        posts = parse_content(html)
-        page += 1
-        # last page (has nothing)
-        if not posts:
-          break
-        for post in posts:
-          title = post['title']
-          date  = str2date(post['date'])
-          if date > date_ed:
-            pass
-          if date < date_st:
-            flag_outdated = True
-            break
-          print(title, date)
-          file.write(f"{title},{post['link']},")
-
-          # get link to news post and extract tags
-          self.edit_log.append(f"正在取得新聞分類 (標題: {title})")
-          try:
-            html = requests.get(post['link']).content
-            html = BS(html, 'html.parser')
-          except Exception:
-            Signal = SigAbort
-            self.edit_log.append(f"程式無法連線至 {post['link']}")
-            QMessageBox.critical(None, 'Error', f"程式無法連線至 {post['link']}; 請檢查網路連線正常且該網站有上線.")
-            break
-          tags = parse_content_tags(html)
-          file.write(" ".join(tags) + '\n')
-        # for each post
-      # while not outdated
-    finally:
-      file.close()
-        
+      _ok = open_external_file(self.save_path)
+      if not _ok:
+        self.edit_log("自動開啟不支援當前版本的作業系統, 請手動開啟")
+  
+  def terminate_worker(self):
+    self.thread.quit()
+    self.worker.deleteLater()
+    self.enable_buttons()
+  
+  def on_worker_aborted(self):
+    print("Worker aborted")
+    self.terminate_worker()
+  
+  def on_worker_errored(self):
+    global LastError
+    print("Worker errored")
+    self.terminate_worker()
+    if LastError:
+      handle_exception(*LastError, window=MainWindow)
 
   def enable_buttons(self):
     for btn in self.active_buttons:
