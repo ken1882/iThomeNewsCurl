@@ -72,15 +72,15 @@ def handle_exception(err, errinfo, window=None):
   if window:
     QMessageBox.critical(None, 'Error', '運行過程中產生錯誤, 詳情請見資訊窗格')
     if dmp_ok:
-      window.edit_log.append(' ')
-      window.edit_log.append(f"運行過程中產生錯誤, 請將紀錄檔 `{dmp_ok}` 寄送給開發人員以排除錯誤")
-      window.edit_log.append(f"錯誤內容: {err}")
-      window.edit_log.append("同時請確認您的輸出路徑無誤")
+      window.append_log(' ')
+      window.append_log(f"運行過程中產生錯誤, 請將紀錄檔 `{dmp_ok}` 寄送給開發人員以排除錯誤")
+      window.append_log(f"錯誤內容: {err}")
+      window.append_log("同時請確認您的輸出路徑無誤")
     else:
-      window.edit_log.append(f"運行過程中產生錯誤, 請將以下內容複製並寄送給開發人員以排除錯誤")
-      window.edit_log.append(str(err))
-      window.edit_log.append(errinfo)
-      window.edit_log.append("同時請確認您的輸出路徑無誤")
+      window.append_log(f"運行過程中產生錯誤, 請將以下內容複製並寄送給開發人員以排除錯誤")
+      window.append_log(str(err))
+      window.append_log(errinfo)
+      window.append_log("同時請確認您的輸出路徑無誤")
   else:
     if dmp_ok:
       QMessageBox.critical(None, 'Error', f'運行過程中產生錯誤, 請將紀錄檔 `{dmp_ok}` 寄送給開發人員以排除錯誤, 同時請確認您的檔案及內容是正確的', QMessageBox.Ok)
@@ -188,15 +188,14 @@ class QtCurlWorker(QObject):
     self.start_async(self.save_path)
 
   def verify_internet(self):
-    self.parent_window.edit_log.moveCursor(QTextCursor.End)
-    self.parent_window.edit_log.append("\n確認連線狀態...")
+    self.parent_window.append_log("\n確認連線狀態...")
     if not is_internet_available():
       self.aborted.emit()
-      self.parent_window.edit_log.append("無網路連線")
+      self.parent_window.append_log("無網路連線")
       QMessageBox.critical(None, 'Error', '沒有網際網路連線!')
       return False
     else:
-      self.parent_window.edit_log.append("已連線")
+      self.parent_window.append_log("已連線")
     return True
 
   def start_async(self, output_path):
@@ -229,13 +228,13 @@ class QtCurlWorker(QObject):
         # Index processing
         uri = f"{TargetURI}?{PageParam}={page}"
         print("Connecting to", uri)
-        self.parent_window.edit_log.append(f"正在連線至 {uri}")
+        self.parent_window.append_log(f"正在連線至 {uri}")
         try:
           html = requests.get(uri).content
           html = BS(html, 'html.parser')
         except Exception:
           self.aborted.emit()
-          self.parent_window.edit_log.append(f"程式無法連線至 {uri}")
+          self.parent_window.append_log(f"程式無法連線至 {uri}")
           QMessageBox.critical(None, 'Error', f"程式無法連線至 {uri}; 請檢查網路連線正常且該網站有上線.")
           break
         posts = parse_content(html)
@@ -255,14 +254,14 @@ class QtCurlWorker(QObject):
           file.write(f"{title},{post['link']},")
           
           # get link to news post and extract tags
-          self.parent_window.edit_log.append(f"正在取得新聞分類 (標題: {title})")
+          self.parent_window.append_log(f"正在取得新聞分類 (標題: {title})")
           print("Getting tags")
           try:
             html = requests.get(post['link']).content
             html = BS(html, 'html.parser')
           except Exception:
             self.aborted.emit()
-            self.parent_window.edit_log.append(f"程式無法連線至 {post['link']}")
+            self.parent_window.append_log(f"程式無法連線至 {post['link']}")
             QMessageBox.critical(None, 'Error', f"程式無法連線至 {post['link']}; 請檢查網路連線正常且該網站有上線.")
             break
           tags = parse_content_tags(html)
@@ -329,6 +328,10 @@ class MainGUI(QMainWindow):
       self.cmb_fast_select
     ]
 
+  def append_log(self,*args):
+    self.edit_log.append(*args)
+    self.edit_log.moveCursor(QTextCursor.End)
+
   def on_auto_open(self, signal):
     self.auto_open = True if signal > 0 else False
 
@@ -358,14 +361,14 @@ class MainGUI(QMainWindow):
     
 
   def execute_mainproc(self):
-    self.edit_log.append("程式開始運行...")
+    self.append_log("程式開始運行...")
     save_path, _ = QFileDialog.getSaveFileName(self, '另存為...', './', 'CSV UTF-8 (逗號分隔) (*.csv)')
     self.save_path = save_path
     if not save_path:
       return
-    self.edit_log.append(f"輸出路徑: {save_path}")
+    self.append_log(f"輸出路徑: {save_path}")
     if not is_file_writable(save_path):
-      self.edit_log.append("程式無法輸出至指定的檔案")
+      self.append_log("程式無法輸出至指定的檔案")
       QMessageBox.critical(None, 'Error', '無法輸出至指定的路徑, 請確認您有權限寫入且該檔案沒有被開啟!')
       return
     self.disable_buttons()
@@ -379,7 +382,7 @@ class MainGUI(QMainWindow):
     
   def on_worker_finished(self):
     print("Worker finished")
-    self.edit_log.append("程式執行完畢!")
+    self.append_log("程式執行完畢!")
     QMessageBox.information(self, 'Info', "程式執行完畢!", QMessageBox.Ok)
     self.terminate_worker()
     if self.auto_open:
