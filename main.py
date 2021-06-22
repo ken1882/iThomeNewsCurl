@@ -316,9 +316,13 @@ class MainGUI(QMainWindow):
     self.btn_save.clicked.connect(lambda: safe_execute_func(self.execute_mainproc))
     self.main_layout.addWidget(self.btn_save, 5, 10, 1, 2)
 
+    self.btn_clear = QPushButton('清除訊息')
+    self.btn_clear.clicked.connect(self.clear_log)
+    self.main_layout.addWidget(self.btn_clear, 5, 9, 1, 1)
+
     self.chk_openfinished = QCheckBox("執行完畢後自動開啟")
     self.chk_openfinished.stateChanged.connect(self.on_auto_open)
-    self.main_layout.addWidget(self.chk_openfinished, 5, 7, 1, 3)
+    self.main_layout.addWidget(self.chk_openfinished, 5, 6, 1, 3)
     
     self.on_fast_select()
 
@@ -331,6 +335,9 @@ class MainGUI(QMainWindow):
   def append_log(self,*args):
     self.edit_log.append(*args)
     self.edit_log.moveCursor(QTextCursor.End)
+
+  def clear_log(self):
+    self.edit_log.clear()
 
   def on_auto_open(self, signal):
     self.auto_open = True if signal > 0 else False
