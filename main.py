@@ -1,4 +1,6 @@
-from PyQt5.QtCore import Qt, QDateTime, QDate, QThread, QObject, pyqtSignal
+# encoding: utf-8
+
+from PyQt5.QtCore import Qt, QDateTime, QDate, QThread, QObject, pyqtSignal, QMutex
 from PyQt5.QtGui import QTextCursor
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QGridLayout, QMessageBox, QFileDialog,
               QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QDateTimeEdit, 
@@ -11,6 +13,13 @@ from datetime import date, datetime, timedelta
 from bs4 import BeautifulSoup as BS
 from threading import Thread
 from time import sleep
+from queue import Queue
+import cgitb
+cgitb.enable(format = 'text')
+
+HttpHeaders = {
+  "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Safari/537.36"
+}
 
 RootURI   = 'http://www.ithome.com.tw'
 TargetURI = "http://www.ithome.com.tw/taxonomy/term/5971/all"
@@ -19,7 +28,6 @@ PageParam = 'page'
 ContentClassPost = '.item'
 ContentClassDate = '.post-at'
 ContentClassTitle = '.title'
-ContentClassTags  = '.category'
 SigWorking  = 0
 SigComplete = 1
 SigError    = 2
@@ -29,6 +37,7 @@ LastError  = None
 MainWindow = None
 MainApp    = None
 Signal     = 0
+Mutex      = QMutex()
 
 FastSelectOptions = {
   '近七天': 7,
@@ -62,9 +71,10 @@ def safe_execute_func(func, args=[], kwargs={}):
       kwargs = {}
     return func(*args, **kwargs)
   except Exception as err:
+    print("An error occurred:", err)
     err_info = traceback.format_exc()
+    print(err_info)
     handle_exception(err, err_info, MainWindow)
-    print(f"An error occurred!\n{err_info}")
   return None
 
 def handle_exception(err, errinfo, window=None):
@@ -135,41 +145,44 @@ def is_internet_available():
     pass
   return False
 
-def parse_content(doc):
+def parse_headline(doc):
   ret = []
   for post in list(doc.select(ContentClassPost)):
     obj = {}
-    # tags
-    # try:
-    #   tags = post.select(ContentClassTags)[0].text
-    #   _tr = str.maketrans({' ': ''})
-    #   obj['tags'] = '; '.join([tag for tag in tags.translate(_tr).split('|') if len(tag) > 1])
-    # except Exception:
-    #   pass
-    # title & href
     try:
       node = post.select(ContentClassTitle)[0]
       obj['title'] = node.text
       obj['link']  = f"{RootURI}{node.select('a')[0]['href']}"
-    except Exception:
+    except Exception as err:
+      print("An error occurred:", err)
       pass
     # date
     try:
       obj['date'] = post.select(ContentClassDate)[0].text.strip()
-    except Exception:
+    except Exception as err:
+      print("An error occurred:", err)
       pass
     if obj:
       ret.append(obj)
   return ret
 
-def parse_content_tags(doc):
-  ret = set()
+def parse_content(doc):
+  ret = []
+  obj = {'tags': [], 'title': '', 'link': ''}
   for node in doc.select('strong'):
     line = node.text.strip()
-    if len(line) < 2 or not (line[0] == '#' or line[0] == '＃'):
-      continue
-    for tag in line.split():
-      ret.add(tag)
+    try:
+      if (line[0] == '#' or line[0] == '＃'):
+        obj['tags'] = line.split()
+      elif line[0] == '詳' or '全文' in line:
+        obj['link'] = node.select('a')[0]['href']
+        print(obj)
+        ret.append(obj)
+        obj = {'tags': [], 'title': '', 'link': ''}
+      else:
+        obj['title'] = line
+    except Exception as err:
+      print(f"[WARNING] Unable to parse section `{line}` due to {err}")
   return ret
 
 class QtCurlWorker(QObject):
@@ -204,6 +217,7 @@ class QtCurlWorker(QObject):
       self._start_async_proc(output_path)
       self.finished.emit()
     except Exception as err:
+      print("An error occurred:", err)
       err_info = traceback.format_exc()
       LastError = (err, err_info)
       self.errored.emit()
@@ -222,7 +236,7 @@ class QtCurlWorker(QObject):
     flag_outdated = False
     print(date_st, date_ed)
     try:
-      file = open(output_path, 'w')
+      file = open(output_path, 'w', encoding='utf8')
       file.write("標題,網址,分類\n")
       while not flag_outdated:
         # Index processing
@@ -230,20 +244,22 @@ class QtCurlWorker(QObject):
         print("Connecting to", uri)
         self.parent_window.append_log(f"正在連線至 {uri}")
         try:
-          html = requests.get(uri).content
+          html = requests.get(uri, headers=HttpHeaders).content
           html = BS(html, 'html.parser')
-        except Exception:
+        except Exception as err:
+          print("An error occurred:", err)
           self.aborted.emit()
           self.parent_window.append_log(f"程式無法連線至 {uri}")
           QMessageBox.critical(None, 'Error', f"程式無法連線至 {uri}; 請檢查網路連線正常且該網站有上線.")
           break
-        posts = parse_content(html)
+        posts = parse_headline(html)
         page += 1
+        print("Process page", page)
         # last page (has nothing)
         if not posts:
           break
         for post in posts:
-          title = post['title']
+          title = post['title'].split('：')[0]
           date  = str2date(post['date'])
           if date > date_ed:
             pass
@@ -251,41 +267,55 @@ class QtCurlWorker(QObject):
             flag_outdated = True
             break
           print(title, date)
-          file.write(f"{title},{post['link']},")
+          file.write(f"{title},{post['link']},\n")
           
           # get link to news post and extract tags
-          self.parent_window.append_log(f"正在取得新聞分類 (標題: {title})")
-          print("Getting tags")
+          self.parent_window.append_log(f"正在取得新聞內容 (標題: {title})")
+          print(f"Getting content of {post['link']}")
           try:
-            html = requests.get(post['link']).content
-            html = BS(html, 'html.parser')
-          except Exception:
+            sleep(0.5)
+            html = requests.get(post['link'], headers=HttpHeaders)
+            html = BS(html.content, 'html.parser')
+          except Exception as err:
+            print("An error occurred:", err)
             self.aborted.emit()
             self.parent_window.append_log(f"程式無法連線至 {post['link']}")
             QMessageBox.critical(None, 'Error', f"程式無法連線至 {post['link']}; 請檢查網路連線正常且該網站有上線.")
             break
-          tags = parse_content_tags(html)
-          file.write(" ".join(tags) + '\n')
+          print("Parsing page")
+          self.parent_window.append_log(f"正在提取文章...")
+          sections = parse_content(html)
+          for section in sections:
+            file.write(section['title']+',')
+            file.write(section['link']+',')
+            print(" ".join(section['tags']))
+            file.write(" ".join(section['tags']) + '\n')
         # for each post
+        sleep(1) # sleep a while to prevent excessive requests crash
       # while not outdated
     finally:
+      print("Done")
       file.close()
 
 ### GUI section
 class MainGUI(QMainWindow):
+  request_logging = pyqtSignal()
+
   def __init__(self):
     super().__init__()
     self.resize(600, 400)
     self.setWindowTitle("iThome 資安周報爬蟲工具")
     self.setWindowOpacity(1)
     self.init_ui()
+    self.log_queue = Queue()
+    self.request_logging.connect(self._logging)
   
   def init_ui(self):
     self.main_widget = QWidget()  
     self.main_layout = QGridLayout()
     self.main_widget.setLayout(self.main_layout)
     self.setCentralWidget(self.main_widget) 
-    
+
     self.main_layout.addWidget(QLabel('開始日期 :'), 0, 0, 1, 1)
     self.in_startdate = QDateTimeEdit(QDateTime.currentDateTime())
     self.in_startdate.setCalendarPopup(True)
@@ -332,9 +362,18 @@ class MainGUI(QMainWindow):
       self.cmb_fast_select
     ]
 
-  def append_log(self,*args):
-    self.edit_log.append(*args)
+  def _logging(self):
+    global Mutex
+    Mutex.lock()
+    while not self.log_queue.empty():
+      msg = self.log_queue.get()
+      self.edit_log.append(msg)
     self.edit_log.moveCursor(QTextCursor.End)
+    Mutex.unlock()
+
+  def append_log(self, message):
+    self.log_queue.put(message)
+    self.request_logging.emit()
 
   def clear_log(self):
     self.edit_log.clear()
@@ -384,6 +423,8 @@ class MainGUI(QMainWindow):
     self.worker.moveToThread(self.thread)
     self.thread.started.connect(self.worker.run)
     self.worker.finished.connect(self.on_worker_finished)
+    self.worker.errored.connect(self.on_worker_errored)
+    self.worker.aborted.connect(self.on_worker_aborted)
     self.thread.finished.connect(self.thread.deleteLater)
     self.thread.start()
     
@@ -427,6 +468,13 @@ def start():
   MainWindow = MainGUI()
   MainWindow.show()
   sys.exit(MainApp.exec_())
+
+sys._excepthook = sys.excepthook 
+def exception_hook(exctype, value, traceback):
+  print(exctype, value, traceback)
+  sys._excepthook(exctype, value, traceback) 
+  sys.exit(1) 
+sys.excepthook = exception_hook 
 
 if __name__ == '__main__':
   safe_execute_func(start)
