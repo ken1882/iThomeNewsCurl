@@ -17,6 +17,8 @@ from queue import Queue
 import cgitb
 cgitb.enable(format = 'text')
 
+AppVersion = "v0.1.1"
+
 HttpHeaders = {
   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Safari/537.36"
 }
@@ -267,7 +269,7 @@ class QtCurlWorker(QObject):
             flag_outdated = True
             break
           print(title, date)
-          file.write(f"{title},{post['link']},\n")
+          file.write(f"{title}, {post['link']}, \n")
           
           # get link to news post and extract tags
           self.parent_window.append_log(f"正在取得新聞內容 (標題: {title})")
@@ -286,8 +288,8 @@ class QtCurlWorker(QObject):
           self.parent_window.append_log(f"正在提取文章...")
           sections = parse_content(html)
           for section in sections:
-            file.write(section['title']+',')
-            file.write(section['link']+',')
+            file.write(section['title']+', ')
+            file.write(section['link']+', ')
             print(" ".join(section['tags']))
             file.write(" ".join(section['tags']) + '\n')
         # for each post
@@ -307,6 +309,7 @@ class MainGUI(QMainWindow):
     self.setWindowTitle("iThome 資安周報爬蟲工具")
     self.setWindowOpacity(1)
     self.init_ui()
+    self.setup_helper_window()
     self.log_queue = Queue()
     self.request_logging.connect(self._logging)
   
@@ -350,6 +353,10 @@ class MainGUI(QMainWindow):
     self.btn_clear.clicked.connect(self.clear_log)
     self.main_layout.addWidget(self.btn_clear, 5, 9, 1, 1)
 
+    self.btn_info = QPushButton('使用說明')
+    self.btn_info.clicked.connect(self.show_helper)
+    self.main_layout.addWidget(self.btn_info, 5, 0, 1, 2)
+
     self.chk_openfinished = QCheckBox("執行完畢後自動開啟")
     self.chk_openfinished.stateChanged.connect(self.on_auto_open)
     self.main_layout.addWidget(self.chk_openfinished, 5, 6, 1, 3)
@@ -361,6 +368,35 @@ class MainGUI(QMainWindow):
       self.in_startdate, self.in_enddate, self.btn_fast_select, self.btn_save,
       self.cmb_fast_select
     ]
+
+  def setup_helper_window(self):
+    global AppVersion
+    self.window_helper = QMessageBox()
+    self.window_helper.setStyleSheet("QLabel{min-width: 600px; font-size: 14px}")
+    self.window_helper.setWindowTitle("使用說明")
+    self.window_helper.setStandardButtons(QMessageBox.Ok)
+    self.window_helper.setText('''
+    <p>程式版本: $TAG_SOFTWARE_VERSION$<p>
+    <p>此程式可抓取iTHome資安週報的新聞以及子新聞內容</p>
+    <hr>
+    <b>UI 說明：</b>
+    <table border=0 cellpadding=0 cellspacing=10>
+    <tr><td>開始、結束日期：想要抓的新聞日期範圍</td></tr>
+    <tr><td>快速選擇：依照選項快速設定開始與結束日期</td></tr>
+    <tr><td>清除訊息：清除訊息欄位內的內容</td></tr>
+    <tr><td>選擇儲存路徑：選擇欲輸出的 csv 路徑，如果檔案已存在且已被 Excel 開啟，需要將其關閉否則無法輸出；選擇確認後程式將會開始執行。</td></tr>
+    </table>
+    <hr>
+    <b>※注意事項</b>
+    <p>程式執行期間輸入欄位將會鎖定，不過仍可以選擇是否執行完成後自動開啟檔案。</p>
+    <p>如果是使用 Excel 開啟輸出的 CSV 且 Excel 預設編碼不是 UTF-8；請使用匯入資料(文字檔)的方式開啟檔案並選擇 UTF-8 編碼。</p>
+    '''.replace('$TAG_SOFTWARE_VERSION$', AppVersion))
+    btn_close = self.window_helper.button(QMessageBox.Ok)
+    btn_close.setText("關閉")
+    self.window_helper.hide()
+
+  def show_helper(self):
+    self.window_helper.show()
 
   def _logging(self):
     global Mutex
@@ -408,7 +444,7 @@ class MainGUI(QMainWindow):
 
   def execute_mainproc(self):
     self.append_log("程式開始運行...")
-    save_path, _ = QFileDialog.getSaveFileName(self, '另存為...', './', 'CSV UTF-8 (逗號分隔) (*.csv)')
+    save_path, _ = QFileDialog.getSaveFileName(self, '另存為...', './', '純文字檔 (*.txt);; CSV UTF-8 (逗號分隔) (*.csv);; 所有檔案 (*.*)')
     self.save_path = save_path
     if not save_path:
       return
